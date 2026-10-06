@@ -30,6 +30,7 @@ import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useIdbTable } from '@/hooks/useIdbTable';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useRoomStore } from '@/stores/roomStore';
 import {
   GRIT_SEQUENCE,
   POLISH_METHOD_COLOR,
@@ -53,6 +54,8 @@ export default function PolishBoard() {
   const setCurrentBodyId = useBodyStore((state) => state.setCurrentBodyId);
   const coats = useCoatStore((state) => state.coats);
   const updateCoat = useCoatStore((state) => state.updateCoat);
+  const resolveReworkedRoomsForCoat = useCoatStore((state) => state.resolveReworkedRoomsForCoat);
+  const rooms = useRoomStore((state) => state.rooms);
   const { progressOf } = useCoatProgress();
 
   const [open, setOpen] = useState(false);
@@ -146,15 +149,31 @@ export default function PolishBoard() {
     message.success(`已按 ${targets.length} 个道次生成目数序列（${GRIT_SEQUENCE.slice(0, targets.length).join(' / ')}）`);
   };
 
-  /** 打磨完成后把道次推进到已完成 */
+  /**
+   * 打磨完成后把道次推进到已完成。
+   * 待复检摘标规则：只摘掉「已判返工」的荫房来源（返工重做闭环）；
+   * 未复检的来源仍挂着，不随打磨完成清除，须到荫房页补记复检。
+   */
   const finishPolish = async (row: Polish): Promise<void> => {
     const coat = bodyCoats.find((item) => item.seq === row.seq);
     if (!coat) {
       message.warning('未找到对应道次');
       return;
     }
-    await updateCoat(coat.id, { state: 'done', needRecheck: false });
-    message.success(`第 ${row.seq} 道打磨完成，道次已置为已完成`);
+    const reworkedRoomIds = coat.recheckRoomIds.filter((roomId) => {
+      const room = rooms.find((item) => item.id === roomId);
+      return room?.recheck?.verdict === 'rework';
+    });
+    await updateCoat(coat.id, { state: 'done' });
+    if (reworkedRoomIds.length > 0) {
+      await resolveReworkedRoomsForCoat(coat.id, reworkedRoomIds);
+    }
+    const remaining = coat.recheckRoomIds.length - reworkedRoomIds.length;
+    message.success(
+      remaining > 0
+        ? `第 ${row.seq} 道打磨完成；仍有 ${remaining} 条荫房记录未复检，待复检标记保留`
+        : `第 ${row.seq} 道打磨完成，返工来源已闭环摘除标记`,
+    );
   };
 
   const columns: ColumnsType<Polish> = [
@@ -164,7 +183,16 @@ export default function PolishBoard() {
       width: 120,
       render: (seq: number) => {
         const coat = bodyCoats.find((item) => item.seq === seq);
-        return coat ? <StageTag state={coat.state} seq={seq} needRecheck={coat.needRecheck} /> : `第 ${seq} 道`;
+        return coat ? (
+          <StageTag
+            state={coat.state}
+            seq={seq}
+            needRecheck={coat.needRecheck}
+            recheckSourceCount={coat.recheckRoomIds.length}
+          />
+        ) : (
+          `第 ${seq} 道`
+        );
       },
     },
     { title: '磨料目数', dataIndex: 'grit', width: 110, render: (value: number) => <Tag color="gold">{value} 目</Tag> },

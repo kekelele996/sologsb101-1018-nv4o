@@ -8,7 +8,7 @@ import type { Room } from '@/types/room';
 import type { Inspect } from '@/types/inspect';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL } from '@/types/body';
 import { COAT_STATE_LABEL, PAINT_TYPE_LABEL } from '@/types/coat';
-import { ROOM_VERDICT_LABEL } from '@/types/room';
+import { ROOM_RECHECK_VERDICT_LABEL, ROOM_VERDICT_LABEL, roomVerdictText } from '@/types/room';
 import { INSPECT_VERDICT_LABEL } from '@/types/inspect';
 import type { LacquerSnapshot } from './db';
 
@@ -75,7 +75,9 @@ export function buildReworkList(
     lines.push(
       `   关联荫房：${
         room
-          ? `${room.date}　${room.tempC}℃ / ${room.humidityPct}%（${ROOM_VERDICT_LABEL[room.verdict]}）`
+          ? `${room.date}　${room.tempC}℃ / ${room.humidityPct}%（${roomVerdictText(room)}）${
+              room.recheck ? `　复检人：${room.recheck.inspector || '未填写'}　复检日期：${room.recheck.date}` : ''
+            }`
           : '未指定'
       }`,
     );
@@ -98,7 +100,11 @@ export function exportReworkList(
 
 /** 工序台账 CSV（全部胎体 + 道次 + 荫房） */
 export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): string {
-  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
+  const header = [
+    '胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家',
+    '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '复检来源荫房',
+    '荫房日期', '温度(℃)', '湿度(%)', '区间判定', '复检结论', '复检人', '复检日期', '有效判定',
+  ];
   const lines: string[] = [header.map(csvCell).join(',')];
   bodies.forEach((body) => {
     const bodyCoats = coats.filter((item) => item.bodyId === body.id).sort((a, b) => a.seq - b.seq);
@@ -107,6 +113,11 @@ export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): s
     for (let index = 0; index < rowCount; index += 1) {
       const coat = bodyCoats[index];
       const room = bodyRooms[index];
+      const sourceDates = coat
+        ? coat.recheckRoomIds
+            .map((roomId) => rooms.find((item) => item.id === roomId)?.date ?? roomId)
+            .join(' / ')
+        : '';
       lines.push(
         [
           index === 0 ? body.code : '',
@@ -121,10 +132,15 @@ export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): s
           coat ? coat.thicknessUm : '',
           coat ? COAT_STATE_LABEL[coat.state] : '',
           coat ? (coat.needRecheck ? '是' : '否') : '',
+          sourceDates,
           room ? room.date : '',
           room ? room.tempC : '',
           room ? room.humidityPct : '',
           room ? ROOM_VERDICT_LABEL[room.verdict] : '',
+          room?.recheck ? ROOM_RECHECK_VERDICT_LABEL[room.recheck.verdict] : '',
+          room?.recheck ? room.recheck.inspector : '',
+          room?.recheck ? room.recheck.date : '',
+          room ? roomVerdictText(room) : '',
         ]
           .map(csvCell)
           .join(','),

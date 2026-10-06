@@ -25,7 +25,13 @@ export interface Coat {
   thicknessUm: number;
   /** 当前状态 */
   state: CoatState;
-  /** 荫房判定异常时回写的「待复检」标记 */
+  /**
+   * 挂起本道次「待复检」的荫房记录 id 列表（引用计数，来源可追溯）。
+   * 记录复检通过 / 返工重做打磨完成时摘除对应 id；仍有未闭环来源时标记保留。
+   * needRecheck 为该列表非空的派生缓存，由 coatStore 统一重算，不直接手改。
+   */
+  recheckRoomIds: string[];
+  /** 荫房判定异常时回写的「待复检」标记（recheckRoomIds 非空的派生缓存） */
   needRecheck: boolean;
   createdAt: number;
   updatedAt: number;
@@ -81,6 +87,12 @@ export function nextCoatState(state: CoatState): CoatState {
   return COAT_STATE_FLOW[index + 1] as CoatState;
 }
 
+/** 以 recheckRoomIds 重算待复检派生标记（去重） */
+export function withRecheckDerived<T extends Pick<Coat, 'recheckRoomIds'>>(coat: T): T & { needRecheck: boolean } {
+  const ids = Array.isArray(coat.recheckRoomIds) ? Array.from(new Set(coat.recheckRoomIds)) : [];
+  return { ...coat, recheckRoomIds: ids, needRecheck: ids.length > 0 };
+}
+
 export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
   return {
     bodyId,
@@ -90,6 +102,7 @@ export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
     coatDate: new Date().toISOString().slice(0, 10),
     thicknessUm: 40,
     state: 'todo',
+    recheckRoomIds: [],
     needRecheck: false,
   };
 }

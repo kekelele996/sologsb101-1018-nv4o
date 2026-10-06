@@ -1,6 +1,9 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Coat 增加 paintType 索引并回填历史记录）
+ * - 数据结构版本号与升级迁移逻辑
+ *   v1 → v2：Coat 增加 paintType 索引并回填历史记录
+ *   v2 → v3：Room 增加 recheck（复检结论/复检人/日期）；Coat 增加 recheckRoomIds
+ *            （待复检标记按荫房记录引用计数，可追溯挂标来源），needRecheck 改为派生缓存
  * - 六张业务表的增删改查与整库导入导出
  * - 首次打开自动播种互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
@@ -8,7 +11,7 @@
 import Dexie, { type Table } from 'dexie';
 import type { Body } from '@/types/body';
 import type { Coat, PaintType } from '@/types/coat';
-import type { Room } from '@/types/room';
+import type { Room, RoomRecheck } from '@/types/room';
 import type { Polish } from '@/types/polish';
 import type { Inlay } from '@/types/inlay';
 import type { Inspect } from '@/types/inspect';
@@ -17,7 +20,7 @@ import type { Inspect } from '@/types/inspect';
 export const DB_NAME = 'gblacquer';
 
 /** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -99,7 +102,7 @@ class LacquerDatabase extends Dexie {
     });
 
     // v2：Coat 增加 paintType 索引；历史记录缺少 paintType 时按「生漆」回填
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         bodies: 'id, code, material, shape, state, updatedAt',
         coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
@@ -117,6 +120,56 @@ class LacquerDatabase extends Dexie {
             if (!legal.includes(coat.paintType)) coat.paintType = 'raw';
             if (typeof coat.needRecheck !== 'boolean') coat.needRecheck = false;
             if (typeof coat.thicknessUm !== 'number') coat.thicknessUm = 40;
+          });
+      });
+
+    // v3：Room 增加 recheck 复检信息；Coat 增加 recheckRoomIds（挂标来源引用计数）。
+    // 索引集合不变（recheckRoomIds 为多值内嵌字段，不建索引）；历史布尔标记迁移为
+    // 「同胎体最近一条未闭环超标荫房记录」的引用，保持旧数据待复检语义不变。
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        bodies: 'id, code, material, shape, state, updatedAt',
+        coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+        rooms: 'id, bodyId, date, verdict, updatedAt',
+        polishes: 'id, bodyId, seq, method, updatedAt',
+        inlays: 'id, bodyId, type, position, updatedAt',
+        inspects: 'id, bodyId, verdict, date, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        const rooms = await tx
+          .table<Room>('rooms')
+          .toCollection()
+          .toArray();
+        // 每个胎体最近一条「偏干/偏湿且未复检通过」的记录，作为历史布尔标记的来源
+        const pendingSourceByBody = new Map<string, string>();
+        [...rooms]
+          .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+          .forEach((room) => {
+            if (room.verdict !== 'suitable' && room.recheck?.verdict !== 'pass') {
+              pendingSourceByBody.set(room.bodyId, room.id);
+            }
+          });
+        await tx
+          .table<Room>('rooms')
+          .toCollection()
+          .modify((room) => {
+            if (room.recheck === undefined) room.recheck = null;
+            const recheck = room.recheck as RoomRecheck | null | undefined;
+            if (recheck && (typeof recheck.inspector !== 'string' || typeof recheck.date !== 'string')) {
+              room.recheck = null;
+            }
+          });
+        await tx
+          .table<Coat>('coats')
+          .toCollection()
+          .modify((coat) => {
+            if (!Array.isArray(coat.recheckRoomIds)) {
+              const source = coat.needRecheck ? pendingSourceByBody.get(coat.bodyId) : undefined;
+              coat.recheckRoomIds = source ? [source] : [];
+            } else {
+              coat.recheckRoomIds = Array.from(new Set(coat.recheckRoomIds));
+            }
+            coat.needRecheck = coat.recheckRoomIds.length > 0;
           });
       });
   }
@@ -184,21 +237,26 @@ export async function seedDatabase(): Promise<void> {
   ];
 
   const coats: Coat[] = [
-    { id: 'coat_0101', bodyId: 'body_01', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-02', thicknessUm: 40, state: 'done', needRecheck: false, createdAt: now - 86400000 * 11, updatedAt: now - 86400000 * 10 },
-    { id: 'coat_0102', bodyId: 'body_01', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-06', thicknessUm: 45, state: 'toPolish', needRecheck: true, createdAt: now - 86400000 * 7, updatedAt: now - 86400000 * 2 },
-    { id: 'coat_0103', bodyId: 'body_01', seq: 3, paintType: 'topcoat', colorName: '推光本色', coatDate: '2026-03-12', thicknessUm: 30, state: 'todo', needRecheck: false, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
-    { id: 'coat_0201', bodyId: 'body_02', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-03', thicknessUm: 35, state: 'done', needRecheck: false, createdAt: now - 86400000 * 8, updatedAt: now - 86400000 * 7 },
-    { id: 'coat_0202', bodyId: 'body_02', seq: 2, paintType: 'color', colorName: '赭石', coatDate: '2026-03-08', thicknessUm: 42, state: 'coated', needRecheck: true, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
-    { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
-    { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
-    { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
+    { id: 'coat_0101', bodyId: 'body_01', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-02', thicknessUm: 40, state: 'done', recheckRoomIds: [], needRecheck: false, createdAt: now - 86400000 * 11, updatedAt: now - 86400000 * 10 },
+    { id: 'coat_0102', bodyId: 'body_01', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-06', thicknessUm: 45, state: 'toPolish', recheckRoomIds: ['room_0102'], needRecheck: true, createdAt: now - 86400000 * 7, updatedAt: now - 86400000 * 2 },
+    { id: 'coat_0103', bodyId: 'body_01', seq: 3, paintType: 'topcoat', colorName: '推光本色', coatDate: '2026-03-12', thicknessUm: 30, state: 'todo', recheckRoomIds: ['room_0102'], needRecheck: true, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
+    { id: 'coat_0201', bodyId: 'body_02', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-03', thicknessUm: 35, state: 'done', recheckRoomIds: [], needRecheck: false, createdAt: now - 86400000 * 8, updatedAt: now - 86400000 * 7 },
+    { id: 'coat_0202', bodyId: 'body_02', seq: 2, paintType: 'color', colorName: '赭石', coatDate: '2026-03-08', thicknessUm: 42, state: 'coated', recheckRoomIds: ['room_0201'], needRecheck: true, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
+    { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', recheckRoomIds: [], needRecheck: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
+    { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', recheckRoomIds: [], needRecheck: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
+    { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', recheckRoomIds: [], needRecheck: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
   ];
 
   const rooms: Room[] = [
-    { id: 'room_0101', bodyId: 'body_01', date: '2026-03-03', tempC: 24, humidityPct: 78, inAt: '09:00', outAt: '21:00', verdict: 'suitable', createdAt: now - 86400000 * 10, updatedAt: now - 86400000 * 10 },
-    { id: 'room_0102', bodyId: 'body_01', date: '2026-03-07', tempC: 27, humidityPct: 56, inAt: '08:30', outAt: '20:00', verdict: 'dry', createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 2 },
-    { id: 'room_0201', bodyId: 'body_02', date: '2026-03-05', tempC: 23, humidityPct: 91, inAt: '10:00', outAt: '22:30', verdict: 'wet', createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
-    { id: 'room_0301', bodyId: 'body_03', date: '2026-02-20', tempC: 25, humidityPct: 76, inAt: '09:30', outAt: '21:30', verdict: 'suitable', createdAt: now - 86400000 * 18, updatedAt: now - 86400000 * 18 },
+    { id: 'room_0101', bodyId: 'body_01', date: '2026-03-03', tempC: 24, humidityPct: 78, inAt: '09:00', outAt: '21:00', verdict: 'suitable', recheck: null, createdAt: now - 86400000 * 10, updatedAt: now - 86400000 * 10 },
+    { id: 'room_0102', bodyId: 'body_01', date: '2026-03-07', tempC: 27, humidityPct: 56, inAt: '08:30', outAt: '20:00', verdict: 'dry', recheck: null, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 2 },
+    { id: 'room_0201', bodyId: 'body_02', date: '2026-03-05', tempC: 23, humidityPct: 91, inAt: '10:00', outAt: '22:30', verdict: 'wet', recheck: null, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
+    { id: 'room_0301', bodyId: 'body_03', date: '2026-02-20', tempC: 25, humidityPct: 76, inAt: '09:30', outAt: '21:30', verdict: 'suitable', recheck: null, createdAt: now - 86400000 * 18, updatedAt: now - 86400000 * 18 },
+    {
+      id: 'room_0302', bodyId: 'body_03', date: '2026-02-27', tempC: 26, humidityPct: 88, inAt: '10:00', outAt: '22:00', verdict: 'wet',
+      recheck: { verdict: 'pass', inspector: '周衡', date: '2026-02-28', note: '漆面成膜正常，湿度峰值时间短，不影响。' },
+      createdAt: now - 86400000 * 16, updatedAt: now - 86400000 * 15,
+    },
   ];
 
   const polishes: Polish[] = [

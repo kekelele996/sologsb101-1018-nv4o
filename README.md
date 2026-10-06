@@ -44,7 +44,7 @@ docker compose up -d --build      # 代码改动后重新构建
 | 构建工具 | Vite 5 | 开发服务器端口 22818 |
 | 状态管理 | Zustand 4 | `bodyStore` / `coatStore` / `roomStore` |
 | 路由 | React Router 6（`createBrowserRouter`，history 模式） | nginx 侧配合 `try_files` 做 SPA fallback |
-| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 含数据结构版本号与 v1→v2 升级迁移 |
+| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 含数据结构版本号与 v1→v2→v3 升级迁移 |
 | 容器化 | Docker 多阶段构建：`node:20-alpine` → `nginx:alpine` | 构建阶段类型检查 + 打包，运行阶段仅托管静态产物 |
 
 ---
@@ -69,7 +69,7 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | --- | --- | --- | --- |
 | `/bodies` | 胎体与器型台账 | 新建胎体、按材质与器型筛选（同步 URL query），卡片回显已完成道次与最近荫房记录 | Body、Coat、Room |
 | `/coats` | 髹涂道次编排 | 拖拽调整道次先后并重编号、批量改漆种与状态、同器型自动带出上次漆种与间隔建议 | Coat、Body |
-| `/rooms` | 荫房温湿度记录 | 按区间判定适宜 / 偏干 / 偏湿，越界回写关联道次为「待复检」，支持日期区间筛选 | Room、Coat |
+| `/rooms` | 荫房温湿度记录 | 按区间判定适宜 / 偏干 / 偏湿，越界给同胎体未完成道次挂「待复检」（按记录 id 登记来源）；每条记录可补记复检（结论 / 复检人 / 日期），通过只摘本条来源，返工退回待打磨；支持日期区间筛选 | Room、Coat |
 | `/polish` | 打磨与推光工序 | 按道次生成目数序列（320→2000），未打磨完的道次禁止进入下一道罩漆 | Polish、Coat |
 | `/inlays` | 镶嵌纹饰登记 | 螺钿 / 蛋壳 / 描金 / 戗金登记与批量调整分类，器型示意区叠加显示 | Inlay、Body |
 | `/export` | 成品质检与导出 | 质检登记（返工定位到具体道次与荫房记录）、返工清单、JSON 导入导出与清空重播种 | Inspect 及全部模型 |
@@ -83,13 +83,24 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | 模型 | 文件 | 关键字段 | 说明 |
 | --- | --- | --- | --- |
 | Body 胎体 | `src/types/body.ts` | `id` `code` `material`（木/脱胎/金属） `shape`（碗/盘/盒/瓶） `sizeMm` `ownerName` `state`（待髹涂/髹涂中/待荫干/已完成） | 新建后进入道次编排，卡片回显进度与最近荫房 |
-| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` | 拖拽调序，同器型带出上次漆种与间隔建议 |
-| Room 荫房记录 | `src/types/room.ts` | `id` `bodyId` `date` `tempC` `humidityPct` `inAt` `outAt` `verdict`（适宜/偏干/偏湿） | 越界即回写关联道次为待复检 |
+| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `recheckRoomIds` `needRecheck` | `needRecheck` 是 `recheckRoomIds` 非空的派生缓存：哪些荫房记录挂着本道次一目了然；复检摘标按来源逐条计数 |
+| Room 荫房记录 | `src/types/room.ts` | `id` `bodyId` `date` `tempC` `humidityPct` `inAt` `outAt` `verdict`（适宜/偏干/偏湿） `recheck`（复检结论 通过/返工、复检人、日期、备注） | 区间判定保留原值；有效判定与超标次数以复检结论为准（通过按适宜计、返工仍超标） |
 | Polish 打磨推光 | `src/types/polish.ts` | `id` `bodyId` `seq` `grit` `method`（水砂/推光/揩清） `durationMin` `operator` | 按道次生成目数序列 |
 | Inlay 镶嵌 | `src/types/inlay.ts` | `id` `bodyId` `type`（螺钿/蛋壳/描金/戗金） `pattern` `position` `materialNote` | 器型示意区叠加显示，支持批量改分类 |
 | Inspect 质检 | `src/types/inspect.ts` | `id` `bodyId` `verdict`（合格/返工） `defectNote` `inspector` `date` `defectCoatSeq` `defectRoomId` | 返工定位到道次与荫房记录并生成返工清单 |
 
-数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`coats` 表增加 `paintType` 索引，并在 Dexie `.upgrade()` 中为历史记录回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`。
+数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：
+- v1→v2（`.upgrade()`）：`coats` 表增加 `paintType` 索引，为历史记录回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`；
+- v2→v3：`rooms` 增加 `recheck`（复检结论 / 复检人 / 日期 / 备注，缺省 `null`）；`coats` 增加 `recheckRoomIds`，历史布尔 `needRecheck=true` 迁移为「同胎体最近一条未闭环超标记录」的来源引用，`needRecheck` 改为按来源列表重算的派生缓存。
+
+### 复检与待复检标记的联动规则
+
+1. 荫房记录保存时按温湿度区间自动判定；偏干 / 偏湿给该胎体**当时未完成**（非「已完成」）的道次挂标记，并把记录 id 登记进道次的 `recheckRoomIds`（道次页「待复检来源」列可查）。
+2. 每条记录可在 `/rooms` 页补记复检，填写结论（复检通过 / 返工）、复检人、日期、备注；区间判定列与超标次数（含 `/bodies`、`/coats` 统计）一律以复检结论为准。
+3. **复检通过**只摘除该记录自己挂在各道次上的来源 id，其他记录挂的标记照常保留；该条不再计入超标次数。
+4. **判返工**：该记录关联的道次退回「待打磨」重做（已完成 / 已涂 → 待打磨；待涂道次尚未施漆，保留待涂），在 `/polish` 页重做并「完成打磨」后才摘掉对应来源；返工记录仍计超标。
+5. 同一道次被两条记录挂过时，只登记其中一条复检**不算清掉**：必须所有来源复检通过、或返工来源重做打磨完成，标记才摘除。该依据同时写在 `/coats` 页顶部提示与道次标签的悬浮说明里。
+6. 复检结论可在原弹窗修改或撤销（撤销后恢复按区间判定挂标）；删除荫房记录前会先摘除其全部挂标。
 
 ---
 

@@ -39,7 +39,7 @@ import { useCoatStore } from '@/stores/coatStore';
 import { useRoomStore } from '@/stores/roomStore';
 import { COAT_STATE_LABEL, PAINT_TYPE_LABEL } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
-import { ROOM_VERDICT_LABEL } from '@/types/room';
+import { roomVerdictText } from '@/types/room';
 import {
   INSPECT_VERDICT_COLOR,
   INSPECT_VERDICT_LABEL,
@@ -229,7 +229,7 @@ export default function ExportView() {
                 : (() => {
                     const room = rooms.find((item) => item.id === record.defectRoomId);
                     return room
-                      ? `${room.date} ${room.tempC}℃ / ${room.humidityPct}%（${ROOM_VERDICT_LABEL[room.verdict]}）`
+                      ? `${room.date} ${room.tempC}℃ / ${room.humidityPct}%（${roomVerdictText(room)}）`
                       : '记录已删除';
                   })()}
             </Typography.Text>
@@ -460,7 +460,7 @@ export default function ExportView() {
                   placeholder="选择荫房记录"
                   options={draftRooms.map((room) => ({
                     value: room.id,
-                    label: `${room.date} ${room.tempC}℃/${room.humidityPct}% · ${ROOM_VERDICT_LABEL[room.verdict]}`,
+                    label: `${room.date} ${room.tempC}℃/${room.humidityPct}% · ${roomVerdictText(room)}`,
                   }))}
                 />
               </Form.Item>

@@ -36,6 +36,7 @@ import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useRoomStore } from '@/stores/roomStore';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -49,6 +50,11 @@ import {
   type PaintType,
 } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
+import {
+  ROOM_RECHECK_VERDICT_LABEL,
+  ROOM_VERDICT_LABEL,
+  type Room,
+} from '@/types/room';
 import { suggestIntervalHours } from '@/utils/humidity';
 
 const FILTER_KEYS = ['paintType', 'state'] as const;
@@ -74,6 +80,7 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const rooms = useRoomStore((state) => state.rooms);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -97,6 +104,51 @@ export default function CoatBoard() {
     () => coats.filter((coat) => coat.bodyId === bodyId).sort((a, b) => a.seq - b.seq),
     [coats, bodyId],
   );
+
+  const roomById = useMemo(() => {
+    const map = new Map<string, Room>();
+    rooms.forEach((room) => map.set(room.id, room));
+    return map;
+  }, [rooms]);
+
+  /** 渲染道次被哪些荫房记录挂着待复检（来源可追溯） */
+  const renderRecheckSources = (coat: Coat) => {
+    if (coat.recheckRoomIds.length === 0) {
+      return <Typography.Text type="secondary">—</Typography.Text>;
+    }
+    return (
+      <Space direction="vertical" size={2}>
+        {coat.recheckRoomIds.map((roomId) => {
+          const room = roomById.get(roomId);
+          if (!room) {
+            return (
+              <Tag key={roomId} color="error">
+                来源记录已删除（{roomId}）
+              </Tag>
+            );
+          }
+          const rework = room.recheck?.verdict === 'rework';
+          return (
+            <Tooltip
+              key={roomId}
+              title={
+                room.recheck
+                  ? `${ROOM_RECHECK_VERDICT_LABEL[room.recheck.verdict]} · 复检人 ${room.recheck.inspector || '未填写'} · ${room.recheck.date}${
+                      rework ? '；重做打磨完成后摘标' : ''
+                    }`
+                  : '尚未复检；在「荫房记录」页补记复检后处理'
+              }
+            >
+              <Tag color={rework ? 'error' : 'warning'} style={{ marginInlineEnd: 0 }}>
+                {room.date} {ROOM_VERDICT_LABEL[room.verdict]}
+                {room.recheck ? ` · ${ROOM_RECHECK_VERDICT_LABEL[room.recheck.verdict]}` : ' · 待复检'}
+              </Tag>
+            </Tooltip>
+          );
+        })}
+      </Space>
+    );
+  };
 
   const filtered = useMemo(() => {
     const keyword = url.keyword.trim();
@@ -139,14 +191,15 @@ export default function CoatBoard() {
       coatDate: coat.coatDate,
       thicknessUm: coat.thicknessUm,
       state: coat.state,
-      needRecheck: coat.needRecheck,
     });
     setOpen(true);
   };
 
   const submit = async (): Promise<void> => {
     const values = await form.validateFields();
-    const payload: CoatDraft = { ...values };
+    // 待复检标记与来源列表由荫房复检流程维护，编辑表单不接收这两个字段
+    const { needRecheck: _flag, recheckRoomIds: _sources, ...rest } = values as CoatDraft;
+    const payload: CoatDraft = { ...rest, recheckRoomIds: [], needRecheck: false };
     if (editing) {
       await updateCoat(editing.id, payload);
       message.success(`已更新第 ${payload.seq} 道工序`);
@@ -215,7 +268,12 @@ export default function CoatBoard() {
       width: 90,
       sorter: (a, b) => a.seq - b.seq,
       render: (seq: number, record) => (
-        <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
+        <StageTag
+          state={record.state}
+          seq={seq}
+          needRecheck={record.needRecheck}
+          recheckSourceCount={record.recheckRoomIds.length}
+        />
       ),
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
@@ -226,6 +284,12 @@ export default function CoatBoard() {
       dataIndex: 'thicknessUm',
       width: 120,
       render: (value: number) => `${value} μm`,
+    },
+    {
+      title: '待复检来源',
+      dataIndex: 'recheckRoomIds',
+      width: 200,
+      render: (_value: string[] | undefined, record) => renderRecheckSources(record),
     },
     {
       title: '操作',
@@ -286,6 +350,21 @@ export default function CoatBoard() {
         <StatBadge label="全局待复检" value={totals.recheck} suffix="道" tone="danger" />
         <StatBadge label="荫干等待" value={stat?.dryingHours ?? 0} suffix="小时" tone="info" />
       </div>
+
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 14 }}
+        message="待复检标记的挂标 / 摘标依据（按荫房记录逐条引用计数）"
+        description={
+          <ol style={{ margin: 0, paddingInlineStart: 18 }}>
+            <li>荫房记录判定偏干 / 偏湿时，给该胎体当时未完成（非「已完成」）的道次挂标记，并在「待复检来源」列登记来源记录；可看出每条标记是被哪条记录挂上的。</li>
+            <li>一条记录复检通过，只摘除它自己挂的标记，其他荫房记录挂的标记照常保留；该条不再计入超标次数。</li>
+            <li>同一道次被两条记录挂过时，只给其中一条登记复检<strong>不算清掉</strong>：必须所有来源记录都复检通过，或判返工的来源重做打磨完成，标记才摘除。</li>
+            <li>复检判返工：该记录关联道次退回「待打磨」，在打磨页重做并「完成打磨」后摘掉对应来源；待涂道次尚未施漆，保留原状态。</li>
+          </ol>
+        }
+      />
 
       {suggestion && suggestion.sourceCode ? (
         <Alert
@@ -443,20 +522,13 @@ export default function CoatBoard() {
               <Select options={[...COAT_STATE_OPTIONS]} />
             </Form.Item>
           </Space>
-          <Form.Item name="needRecheck" label="待复检">
-            <Select
-              options={[
-                { value: false, label: '正常' },
-                { value: true, label: '待复检（荫房异常）' },
-              ]}
-            />
-          </Form.Item>
           <Alert
             type="warning"
             showIcon
             message={`环境适宜时，${PAINT_TYPE_LABEL[form.getFieldValue('paintType') as PaintType] ?? '该漆种'}建议间隔约 ${
               suggestion?.intervalHours ?? suggestIntervalHours('raw')
             } 小时再进入下一道`}
+            description="待复检标记由荫房记录复检自动摘挂，无需手工修改；挂标来源见列表「待复检来源」列。"
           />
         </Form>
       </Modal>
