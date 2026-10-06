@@ -33,6 +33,7 @@ export default function App() {
   const loadBodies = useBodyStore((state) => state.loadBodies);
   const coats = useCoatStore((state) => state.coats);
   const loadCoats = useCoatStore((state) => state.loadCoats);
+  const reconcileRecheckFlags = useCoatStore((state) => state.reconcileRecheckFlags);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
 
@@ -43,6 +44,9 @@ export default function App() {
         await initDatabase();
         if (cancelled) return;
         await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        // 以荫房记录的挂起名单 / 复检结论为准，校准一次道次待复检标记（覆盖升级前的历史数据）
+        if (cancelled) return;
+        await reconcileRecheckFlags();
       } catch (error) {
         if (cancelled) return;
         message.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -51,7 +55,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBodies, loadCoats, loadRooms, message]);
+  }, [loadBodies, loadCoats, loadRooms, reconcileRecheckFlags, message]);
 
   const currentBody = bodies.find((body) => body.id === currentBodyId) ?? null;
   const selectedKey = location.pathname.startsWith('/coats')

@@ -35,7 +35,7 @@ export function StageTag({ state, needRecheck = false, seq, suffix }: StageTagPr
         {text}
       </Tag>
       {needRecheck ? (
-        <Tooltip title="关联荫房温湿度越界，需复检漆层">
+        <Tooltip title="有尚未复检的偏干 / 偏湿荫房记录挂着本道次，请到荫房记录页补记复检">
           <Tag icon={<ExclamationCircleOutlined />} color="warning">
             待复检
           </Tag>

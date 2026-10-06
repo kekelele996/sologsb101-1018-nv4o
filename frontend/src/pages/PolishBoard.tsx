@@ -153,7 +153,8 @@ export default function PolishBoard() {
       message.warning('未找到对应道次');
       return;
     }
-    await updateCoat(coat.id, { state: 'done', needRecheck: false });
+    // 打磨完成 → 道次闭环为已完成；待复检标记随状态变更按挂起名单自动对账（已完成道次不挂标记）
+    await updateCoat(coat.id, { state: 'done' });
     message.success(`第 ${row.seq} 道打磨完成，道次已置为已完成`);
   };
 

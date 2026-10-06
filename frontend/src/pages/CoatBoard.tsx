@@ -48,6 +48,8 @@ import {
   type CoatState,
   type PaintType,
 } from '@/types/coat';
+import { ROOM_VERDICT_LABEL, isRoomPending } from '@/types/room';
+import { useRoomStore } from '@/stores/roomStore';
 import { BODY_SHAPE_LABEL } from '@/types/body';
 import { suggestIntervalHours } from '@/utils/humidity';
 
@@ -74,6 +76,7 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const rooms = useRoomStore((state) => state.rooms);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -139,14 +142,14 @@ export default function CoatBoard() {
       coatDate: coat.coatDate,
       thicknessUm: coat.thicknessUm,
       state: coat.state,
-      needRecheck: coat.needRecheck,
     });
     setOpen(true);
   };
 
   const submit = async (): Promise<void> => {
     const values = await form.validateFields();
-    const payload: CoatDraft = { ...values };
+    // needRecheck 不由表单手改：由荫房记录的挂起名单与复检结论自动对账
+    const payload: CoatDraft = { ...values, needRecheck: editing?.needRecheck ?? false };
     if (editing) {
       await updateCoat(editing.id, payload);
       message.success(`已更新第 ${payload.seq} 道工序`);
@@ -228,6 +231,44 @@ export default function CoatBoard() {
       render: (value: number) => `${value} μm`,
     },
     {
+      title: '待复检依据',
+      key: 'recheckBasis',
+      width: 230,
+      render: (_value, record) => {
+        // 依据：只统计「初判超标且尚未复检」、且挂起名单含本道次的荫房记录。
+        // 同一道次被多条记录挂过时，一条复检通过只摘除该条；其余记录仍挂，
+        // 因此必须全部记录复检通过，本道次的待复检标记才会清除。
+        const pendingRooms = rooms.filter(
+          (room) => room.bodyId === record.bodyId && isRoomPending(room) && room.flaggedCoatIds.includes(record.id),
+        );
+        if (pendingRooms.length === 0) {
+          return <Typography.Text type="secondary">—</Typography.Text>;
+        }
+        return (
+          <Tooltip
+            title={
+              <div>
+                <div>本道次被 {pendingRooms.length} 条尚未复检的荫房记录挂起：</div>
+                {pendingRooms.map((room) => (
+                  <div key={room.id}>
+                    {room.date} · 初判{ROOM_VERDICT_LABEL[room.verdict]}（{room.tempC}℃/{room.humidityPct}%）
+                  </div>
+                ))}
+                <div>须逐条到荫房记录页补记复检；全部通过后标记才清除。</div>
+              </div>
+            }
+          >
+            <Space size={4} wrap>
+              <Tag color="#c9963c">{pendingRooms.length} 条记录挂起</Tag>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {pendingRooms.map((room) => room.date.slice(5)).join('、')}
+              </Typography.Text>
+            </Space>
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: '操作',
       key: 'action',
       width: 220,
@@ -278,6 +319,22 @@ export default function CoatBoard() {
           </Button>
         </Space>
       </div>
+
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 14 }}
+        message="待复检标记的挂起与清除依据"
+        description={
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            <li>每条荫房记录判偏干 / 偏湿时，只把该胎体当时未完成的道次记到「这条记录自己」的挂起名单，可在「待复检依据」列看到具体是哪几条记录挂的。</li>
+            <li>对一条记录补记复检：复检通过只摘除该记录挂的标记，其他记录挂的标记照留；判返工把该记录关联的道次退回待打磨。</li>
+            <li>
+              <strong>同一道次被两条记录挂过时，只登记一条复检不算清掉</strong>：必须把挂它的记录全部复检通过，道次上的待复检标记才会清除（只要还有一条未复检或判返工，标记保留）。
+            </li>
+          </ol>
+        }
+      />
 
       <div className="gb-stat-row">
         <StatBadge label="道次总数" value={stat?.coatTotal ?? 0} suffix="道" tone="primary" />
@@ -443,17 +500,20 @@ export default function CoatBoard() {
               <Select options={[...COAT_STATE_OPTIONS]} />
             </Form.Item>
           </Space>
-          <Form.Item name="needRecheck" label="待复检">
-            <Select
-              options={[
-                { value: false, label: '正常' },
-                { value: true, label: '待复检（荫房异常）' },
-              ]}
-            />
-          </Form.Item>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginTop: 4 }}
+            message={
+              editing?.needRecheck
+                ? '本道次当前挂着「待复检」，请在荫房记录页对挂起它的记录逐条补记复检，标记由系统对账清除，不支持在此手动取消。'
+                : '待复检标记由荫房记录自动挂起 / 清除：偏干偏湿记录复检通过摘本条标记，判返工则本道次退回待打磨。'
+            }
+          />
           <Alert
             type="warning"
             showIcon
+            style={{ marginTop: 8 }}
             message={`环境适宜时，${PAINT_TYPE_LABEL[form.getFieldValue('paintType') as PaintType] ?? '该漆种'}建议间隔约 ${
               suggestion?.intervalHours ?? suggestIntervalHours('raw')
             } 小时再进入下一道`}

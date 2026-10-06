@@ -8,7 +8,7 @@ import type { Room } from '@/types/room';
 import type { Inspect } from '@/types/inspect';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL } from '@/types/body';
 import { COAT_STATE_LABEL, PAINT_TYPE_LABEL } from '@/types/coat';
-import { ROOM_VERDICT_LABEL } from '@/types/room';
+import { ROOM_RECHECK_LABEL, ROOM_VERDICT_LABEL, effectiveRoomVerdict } from '@/types/room';
 import { INSPECT_VERDICT_LABEL } from '@/types/inspect';
 import type { LacquerSnapshot } from './db';
 
@@ -75,7 +75,9 @@ export function buildReworkList(
     lines.push(
       `   关联荫房：${
         room
-          ? `${room.date}　${room.tempC}℃ / ${room.humidityPct}%（${ROOM_VERDICT_LABEL[room.verdict]}）`
+          ? `${room.date}　${room.tempC}℃ / ${room.humidityPct}%（初判${ROOM_VERDICT_LABEL[room.verdict]}${
+              room.recheck ? `，复检：${ROOM_RECHECK_LABEL[room.recheck.verdict]} ${room.recheck.inspector || '未填复检人'} ${room.recheck.date}` : ''
+            }）`
           : '未指定'
       }`,
     );
@@ -98,7 +100,7 @@ export function exportReworkList(
 
 /** 工序台账 CSV（全部胎体 + 道次 + 荫房） */
 export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): string {
-  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
+  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定(复检后)', '复检结论', '复检人', '复检日期'];
   const lines: string[] = [header.map(csvCell).join(',')];
   bodies.forEach((body) => {
     const bodyCoats = coats.filter((item) => item.bodyId === body.id).sort((a, b) => a.seq - b.seq);
@@ -124,7 +126,10 @@ export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): s
           room ? room.date : '',
           room ? room.tempC : '',
           room ? room.humidityPct : '',
-          room ? ROOM_VERDICT_LABEL[room.verdict] : '',
+          room ? ROOM_VERDICT_LABEL[effectiveRoomVerdict(room)] : '',
+          room && room.recheck ? ROOM_RECHECK_LABEL[room.recheck.verdict] : '',
+          room && room.recheck ? room.recheck.inspector : '',
+          room && room.recheck ? room.recheck.date : '',
         ]
           .map(csvCell)
           .join(','),
